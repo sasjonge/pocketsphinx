@@ -54,6 +54,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
+#include <fcntl.h>
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
 #include <windows.h>
@@ -65,6 +66,46 @@
 #include <sphinxbase/ad.h>
 
 #include "pocketsphinx.h"
+
+#include <xmlrpc-c/base.h>
+#include <xmlrpc-c/client.h>
+
+#include <fdsink.h>
+
+#define NAME "Xmlrpc-c Test Client"
+#define VERSION "1.0"
+#define NBTHREADS 1400
+#define BEAMSIZE 1400
+
+//global variables
+static pthread_mutex_t mutex;
+static int pip[NBTHREADS];
+static int*  pipes[NBTHREADS];
+int counter=0;
+static char const *cfg;
+static char* configDict[NBTHREADS];
+static char* configLM[NBTHREADS];
+static pthread_t threads[NBTHREADS];
+static ps_decoder_t* psobj[NBTHREADS];
+static cmd_ln_t* configobj[NBTHREADS];
+static char* hypobj[NBTHREADS];
+static int32 scobj[NBTHREADS];
+static int32 firstscobj[BEAMSIZE];
+static char* hmm;
+static char* mllr;
+
+//collecting parameter
+static int INDEX;
+static int PNBTHREADS;
+static int PBEAMSIZE;
+static int TRESHOLDY;
+static char* HOST;
+static int PORT;
+static char* RPCPORT;
+static char* DATAPATH;
+static char* ASRCWD;
+static char* HMM;
+static char* MLLR;
 
 static const arg_t cont_args_def[] = {
     POCKETSPHINX_OPTIONS,
@@ -95,6 +136,163 @@ static const arg_t cont_args_def[] = {
 static ps_decoder_t *ps;
 static cmd_ln_t *config;
 static FILE *rawfd;
+
+//attributes
+//boost::thread _gst_thread;
+static GstElement *_pipeline, *_source, *_filter, *_sink, *_convert, *_encode, *_tee;
+static GstBus *_bus;
+static int _bitrate, _channels, _depth, _sample_rate;
+static GMainLoop *_loop;
+static char* _format;
+static guint8 *data; 
+static int in[NBTHREADS];
+
+
+static void setpipe(int pIn[]){
+    int flags,i;
+    for(i=0;i<PNBTHREADS;i++){
+      in[i]=pIn[i];
+      //flags = fcntl(this->in[i], F_GETFL, 0);
+      //fcntl(this->in[i], F_SETFL, flags | O_NONBLOCK);
+    }
+}
+
+//signal handling functions
+static gboolean onMessage (GstBus *bus, GstMessage *message, gpointer userData)
+{
+  GError *err;
+  gchar *debug;
+
+  gst_message_parse_error(message, &err, &debug);
+  printf("\n\n%s\n\n",GST_MESSAGE_SRC_NAME(message));
+  printf("\n\n%s\n\n","Error:");
+  printf("\n\n%s\n\n",gst_message_type_get_name(GST_MESSAGE_TYPE(message)));
+  
+  g_error_free(err);
+  g_free(debug);
+  g_main_loop_quit(_loop);
+  exitOnMainThread(1);
+  return FALSE;
+}
+
+//audio stream
+static void startAudiostream(int pip[])
+{
+  //set pipe
+  setpipe(pip);
+  //bit rate 24Khz=192bits/s
+  _bitrate = 192;
+  // Need to encoding or publish raw wave data
+   _format="S16LE";
+  // The bitrate at which to encode the audio
+  _bitrate=192;
+  // only available for raw data
+  
+  _channels=1;
+  _depth=16;
+  _sample_rate=16000;
+  // The destination of the audio
+  char* dst_type;
+  dst_type="fdsink";
+  // The source of the audio
+  char* source_type;
+  source_type="tcpserversrc";//tcpserversrc
+  char* device;
+  device="";
+  //main loop
+  _loop = g_main_loop_new(NULL, FALSE);
+  //empty pipeline
+  _pipeline = gst_pipeline_new("ros_pipeline");
+  //pipe line bus
+  _bus = gst_pipeline_get_bus(GST_PIPELINE(_pipeline));
+  //supervise bus
+  gst_bus_add_signal_watch(_bus);
+  //bus event handler
+  g_signal_connect(_bus, "message::error",
+                   G_CALLBACK(onMessage), 0);
+  //free bus
+  g_object_unref(_bus);
+  // We create the sink first, just for convenience
+  _sink = gst_element_factory_make("multifdsink", "sink");
+ 
+ 
+  //tcpserversrc
+  _source = gst_element_factory_make("tcpserversrc", "source");  
+  g_object_set (G_OBJECT (_source), "host", "localhost",NULL);
+  g_object_set (G_OBJECT (_source), "port","7000" ,NULL);
+ 
+
+ 
+    gboolean link_ok;
+   //filter
+  _filter = gst_element_factory_make("capsfilter", "filter");
+  //bus format
+    GstCaps *caps;
+    caps = gst_caps_new_simple("audio/x-raw",
+                               "channels", G_TYPE_INT, _channels,
+                               "width",    G_TYPE_INT, _depth,
+                               "depth",    G_TYPE_INT, _depth,
+                               "rate",     G_TYPE_INT, _sample_rate,
+                               "signed",   G_TYPE_BOOLEAN, TRUE,
+                               "format",   G_TYPE_STRING, "S16LE",
+                               NULL);
+
+    g_object_set( G_OBJECT(_filter), "caps", caps, NULL);
+    gst_caps_unref(caps);
+    gst_bin_add_many( GST_BIN(_pipeline), _source,_filter, _sink, NULL);
+    link_ok = gst_element_link_many( _source,_filter, _sink, NULL);
+ 
+  //check if pipeline correctly linked
+  if (!link_ok) {
+    printf("\n%s\n","Unsupported media type.");
+    exitOnMainThread(1);
+  }
+  //start the pipeline
+  gst_element_set_state(GST_ELEMENT(_pipeline), GST_STATE_PLAYING);
+  //streaming thread
+  //adding descriptor to sink
+  int i;
+  for(i=0;i<PNBTHREADS;i++){
+    g_signal_emit_by_name(_sink, "add", in[i], G_TYPE_NONE);
+ }
+  //start streaming
+  //_gst_thread = boost::thread( boost::bind(g_main_loop_run, _loop) );
+  pthread_t _gst_thread;
+  pthread_create(&_gst_thread, NULL, g_main_loop_run, &_loop);
+
+}
+ //destructor
+static void stopAudiostream()
+{  int i;
+  printf("\n%s\n","*******************STREAM TERMINATES*******************!!!.");
+  //quit thread
+  g_main_loop_quit(_loop);
+  //stop pipeline
+  gst_element_set_state(_pipeline, GST_STATE_NULL);
+  //discharge the pipeline
+  gst_object_unref(_pipeline);
+  //discharge threads
+  g_main_loop_unref(_loop);
+ //close pipes
+  for(i=0;i<PNBTHREADS;i++){
+     close(in[i]);
+  }
+  printf("\n%s\n","*******************STREAM TERMINATED*******************!!!.");
+}
+//exit thread
+void exitOnMainThread(int code)
+{
+  exit(code);
+}
+
+static void 
+dieIfFaultOccurred (xmlrpc_env * const envP) {
+    if (envP->fault_occurred) {
+        fprintf(stderr, "ERROR: %s (%d)\n",
+                envP->fault_string, envP->fault_code);
+        exit(1);
+    }
+}
 
 static void
 print_word_times()
@@ -222,6 +420,71 @@ sleep_msec(int32 ms)
 #endif
 }
 
+
+int  sendDataOut(char recognizedWord[]){
+       /******************************RPC CLIENT*************************/
+
+    xmlrpc_env env;
+    xmlrpc_value * resultP;
+    xmlrpc_int32 sum;
+    char *serverUrl = malloc(strlen(HOST)+strlen(RPCPORT)+14);
+    const char *  methodName = "on_word_recognized";
+    strcpy(serverUrl, "http://");
+    strcat(serverUrl, HOST);
+    strcat(serverUrl, ":");
+    strcat(serverUrl, RPCPORT);
+    strcat(serverUrl, "/RPC2");
+    
+    /* Initialize our error-handling environment. */
+    xmlrpc_env_init(&env);
+
+    /* Create the global XML-RPC client object. */
+    xmlrpc_client_init2(&env, XMLRPC_CLIENT_NO_FLAGS, NAME, VERSION, NULL, 0);
+    dieIfFaultOccurred(&env);
+
+    printf("Making XMLRPC call to server url '%s' method '%s' "
+           "to request the sum "
+           "of 5 and 7...\n", serverUrl, methodName);
+
+    /* Make the remote procedure call */
+    resultP = xmlrpc_client_call(&env, serverUrl, methodName,
+                                 "(s)", recognizedWord);
+    dieIfFaultOccurred(&env);
+    
+    /* Get our sum and print it out. */
+    xmlrpc_read_int(&env, resultP, &sum);
+    dieIfFaultOccurred(&env);
+    printf("The sum is %d\n", sum);
+    
+    /* Dispose of our result value. */
+    xmlrpc_DECREF(resultP);
+
+    /* Clean up our error-handling environment. */
+    xmlrpc_env_clean(&env);
+    
+    /* Shutdown our XML-RPC client library. */
+    xmlrpc_client_cleanup();
+
+    return sum;
+
+/*******************************END******************************/
+
+
+}
+
+static int isEmpty(char* s){
+       if(s==NULL)
+         return 1;
+       else{
+          int n=strlen(s);
+          int i;
+          for(i=0;i<n;i++)
+             if(s[i]!=' ')
+               return 0;
+          return 1;
+       }
+} 
+
 /*
  * Main utterance processing loop:
  *     for (;;) {
@@ -230,45 +493,115 @@ sleep_msec(int32 ms)
  *        print utterance result;
  *     }
  */
-static void
-recognize_from_microphone()
+static void recognize_from_microphone(ps_decoder_t* ps, cmd_ln_t* config, int i)
 {
-    ad_rec_t *ad;
+    
     int16 adbuf[2048];
     uint8 utt_started, in_speech;
-    int32 k;
+    int32 k,score, posterior;
     char const *hyp;
-
-    if ((ad = ad_open_dev(cmd_ln_str_r(config, "-adcdev"),
-                          (int) cmd_ln_float32_r(config,
-                                                 "-samprate"))) == NULL)
-        E_FATAL("Failed to open audio device\n");
-    if (ad_start_rec(ad) < 0)
-        E_FATAL("Failed to start recording\n");
-
+    int length,j,max,l,flags;
+    char finalhyp[1000];
+    finalhyp[0]='\0';
+    int inout;//pipes
+   
     if (ps_start_utt(ps) < 0)
         E_FATAL("Failed to start utterance\n");
     utt_started = FALSE;
+    
+     inout=pipes[i][0]; 
+    //making non blocking stream
+    flags = fcntl(inout, F_GETFL, 0);
+    fcntl(inout, F_SETFL, flags | O_NONBLOCK);
+    //audiostream output. only instanciated by thread 0
+    if(i==0)
+       startAudiostream(pip);
+      
     E_INFO("Ready....\n");
-
     for (;;) {
-        if ((k = ad_read(ad, adbuf, 2048)) < 0)
+       //printf("...........NOTHING %d %d....\n",i,k);
+        k = read(inout, adbuf, 4096);
+        if(k==-1)
+           k++;
+        if (k < 0)
             E_FATAL("Failed to read audio\n");
+       k=k/2;
         ps_process_raw(ps, adbuf, k, FALSE, FALSE);
         in_speech = ps_get_in_speech(ps);
         if (in_speech && !utt_started) {
             utt_started = TRUE;
             E_INFO("Listening...\n");
         }
+       
         if (!in_speech && utt_started) {
             /* speech -> silence transition, time to start new utterance  */
             ps_end_utt(ps);
-            hyp = ps_get_hyp(ps, NULL );
-            if (hyp != NULL) {
-                printf("%s\n", hyp);
-                fflush(stdout);
-            }
+            hyp = ps_get_hyp(ps, &score );
+            posterior=ps_get_prob(ps);
+            //print full result for this thread
+            printf(" Final score: %d  \n", score);
+            printf(" Final posterior: %d  \n", posterior);
+            //discard previous hypothesis
+            if(hypobj[i]!=NULL)
+            free(hypobj[i]);
+            if(hyp!=NULL){
+                    //allocate space for new hypothesis
+                    length=strlen(hyp)+1;
+                    hypobj[i]=(char*)malloc(sizeof(char)*length);
+                    //save hypothesis
+                    strcpy(hypobj[i],hyp);
+                    //save score;
+                    scobj[i]=score; 
+                    if(scobj[i]<TRESHOLDY) 
+                    scobj[i]=0;
+                    //print hyp
+                    printf("\n\n HYPOTHESIS %d %d: %s \n\n",i,scobj[i], hyp);
+            }else
+                    scobj[i]=0;
 
+            pthread_mutex_lock(&mutex);
+            printf("\n\n------------------ THREAD %d,%d------------\n\n",i,counter);
+            //critical section: shared ressource: counter
+            counter++;
+            if(counter==PNBTHREADS){
+            //all threads have completed.
+              counter=0;
+            //get the BEAMSIZE best hypothesis
+              for(l=0;l<PBEAMSIZE;l++){
+                 max=0;
+                 for(j=0;j<PNBTHREADS;j++)
+                   if(scobj[j]>scobj[max] && scobj[j]<0 || scobj[j]<0 && scobj[max]>=0)
+                     max=j;
+                 firstscobj[l]=max;
+                 if(scobj[max]<0)
+                   scobj[max]=1;
+              }
+                 
+              //merge the BEAMSIZE best hypothesis
+              for(j=0;j<PBEAMSIZE;j++)
+                 
+                  if(scobj[firstscobj[j]]==1){
+                          strcat(finalhyp,hypobj[firstscobj[j]]);
+                          strcat(finalhyp," ");
+                  }
+              if(strlen(finalhyp)>0){
+                if(isEmpty(finalhyp) != 0){
+            printf("\n\n HYPOTHESIS: %s\n\n",finalhyp );
+            if(sendDataOut(finalhyp)==0){
+               printf("\n\n---HYPOTHESIS SENT SUCCESSFULLY-\n\n");
+            }else
+             printf("\n\n---HYPOTHESIS SENDING FAILED-\n\n");
+           
+                
+              }else
+                  printf("\n\n HYPOTHESIS: NOTHING\n\n");
+               finalhyp[0]='\0';
+            }}
+            fflush(stdout);//output console  update
+            printf("\n\n-----------------------------------------\n\n");
+            //exit critical section
+            pthread_mutex_unlock(&mutex);
+            
             if (ps_start_utt(ps) < 0)
                 E_FATAL("Failed to start utterance\n");
             utt_started = FALSE;
@@ -276,69 +609,184 @@ recognize_from_microphone()
         }
         sleep_msec(100);
     }
-    ad_close(ad);
+    close(inout);
 }
+
+void *recognizer(void*arg)
+{
+
+
+
+     int i;
+     i=*((int*)arg);
+      printf("\n%s\n","in");
+
+     if(FALSE) {
+        configobj[i]= cmd_ln_init(NULL,  cont_args_def,TRUE, "-dict", configDict[i],"-lm", configLM[i], "-inmic", "yes",NULL);
+     }
+      else {
+        printf("\n%s\n",configDict[i]);
+        configobj[i]= cmd_ln_init(NULL,  cont_args_def,TRUE, "-dict", configDict[i],"-lm", configLM[i], "-inmic", "yes",NULL);
+      }
+
+      printf("\n%s\n","out");
+     /* Handle argument file as -argfile. */
+    if (configobj[i] && (cfg = cmd_ln_str_r(configobj[i], "-argfile")) != NULL) {
+        configobj[i] = cmd_ln_parse_file_r(configobj[i], cont_args_def, cfg, FALSE);
+    }
+
+    if (configobj[i] == NULL || (cmd_ln_str_r(configobj[i], "-infile") == NULL && cmd_ln_boolean_r(configobj[i], "-inmic") == FALSE)) {
+  E_INFO("Specify '-infile <file.wav>' to recognize from file or '-inmic yes' to recognize from microphone.\n");
+        cmd_ln_free_r(configobj[i]);
+  return (void*)1;
+    }
+
+    ps_default_search_args(configobj[i]);
+    psobj[i] = ps_init(configobj[i]);
+    if (psobj[i] == NULL) {
+        cmd_ln_free_r(configobj[i]);
+        return (void*)1;
+    }
+
+  
+
+    if (cmd_ln_str_r(configobj[i], "-infile") != NULL) {
+        //recognize_from_file(psobj[i],configobj[i]);
+    } else if (cmd_ln_boolean_r(configobj[i], "-inmic")) {
+        recognize_from_microphone(psobj[i],configobj[i],i);
+    }
+
+    ps_free(psobj[i]);
+    cmd_ln_free_r(configobj[i]);
+
+    return (void*)0;
+
+}
+
+static unsigned numOfDigit(int n) {
+  if (n <10) {
+    return 1;
+  }
+  return 1 + numOfDigit(n/10);
+}
+
+/********************** MAIN THREADS ***************************************************/
+
 
 int
 main(int argc, char *argv[])
 {
-    char const *cfg;
+ //check all parameters are there
+ if(argc!=12){
+    printf("\n\n%s\n\n","Error in sphinx asr: incorrect parameters...");
+   return 0;
+ 
+ }else{
 
-    config = cmd_ln_parse_r(NULL, cont_args_def, argc, argv, TRUE);
+   //collecting parameter
+    printf("\n%s\n","Loading parameters...");
+   INDEX=atoi(argv[1]);
+    printf("\n%s","INDEX: ");
+    printf("%i\n",INDEX);
+   PNBTHREADS=atoi(argv[2]);
+    printf("\n%s","NBTHREADS: ");
+    printf("%i\n",PNBTHREADS);
+   PBEAMSIZE=atoi(argv[3]);
+    printf("\n%s","BEAMSIZE: ");
+    printf("%i\n",PBEAMSIZE);
+   HOST=argv[4];
+    printf("\n%s","LOCALHOST: ");
+    printf("%s\n",HOST);
+   PORT=atoi(argv[5]);
+    printf("\n%s","LOCALPORT: ");
+    printf("%i\n",PORT);
+   DATAPATH=argv[6];
+    printf("\n%s","DATAPATH: ");
+    printf("%s\n",DATAPATH);
+   ASRCWD="/home/sascha/suturo16/catkin_ws/src/pepper-dialog";
+    printf("\n%s","ASRCWD: ");
+    printf("%s\n",ASRCWD);
+   RPCPORT="7000";
+    printf("\n%s","RPCPORT: ");
+    printf("%s\n",RPCPORT);
+   TRESHOLDY=-10000;
+    printf("\n%s","TRESHOLD: ");
+    printf("%i\n",TRESHOLDY);
+   HMM=argv[10];
+    printf("\n%s","HMM: ");
+    printf("%s\n",HMM);
+   MLLR=argv[11];
+    printf("\n%s","MLLR: ");
+    printf("%s\n",MLLR);
+   //create configuration data
+   int i = 0;
+   for(i=0;i<PNBTHREADS;i++){
+      unsigned lengthOfIndexPlusI = numOfDigit(INDEX+i);
+      char indexStr[12];
+      sprintf(indexStr, "%d", (INDEX+i));
+      configDict[i]=malloc(strlen(ASRCWD)+strlen(DATAPATH)+lengthOfIndexPlusI+13);
+      strcpy(configDict[i], ASRCWD);
+      strcat(configDict[i], "/");
+      strcat(configDict[i], DATAPATH);
+      strcat(configDict[i], "/pepper");
+      strcat(configDict[i], indexStr);
+      strcat(configDict[i], ".dic");
+      printf("\n%s","DIC: ");
+      printf("%s\n",configDict[i]);
+      configLM[i]=malloc(strlen(ASRCWD)+strlen(DATAPATH)+lengthOfIndexPlusI+13);
+      strcpy(configLM[i], ASRCWD);
+      strcat(configLM[i], "/");
+      strcat(configLM[i], DATAPATH);
+      strcat(configLM[i], "/pepper");
+      strcat(configLM[i], indexStr);
+      strcat(configLM[i], ".lm");
+      printf("\n%s","LM: ");
+      printf("%s\n",configLM[i]);
+   }
+   
+   hmm=malloc(strlen(ASRCWD)+strlen(HMM)+2);
+    strcpy(hmm, ASRCWD);
+    strcat(hmm, "/");
+    strcat(hmm, HMM);
+    mllr=malloc(strlen(ASRCWD)+strlen(MLLR)+2);
+    strcpy(mllr, ASRCWD);
+    strcat(mllr, "/");
+    strcat(mllr, MLLR);
 
-    /* Handle argument file as -argfile. */
-    if (config && (cfg = cmd_ln_str_r(config, "-argfile")) != NULL) {
-        config = cmd_ln_parse_file_r(config, cont_args_def, cfg, FALSE);
+   int t=0,rc;
+   strlen(NULL);
+   //init gstreamer
+   gst_init(&argc, &argv);
+   //create pipes
+   for(t=0;t<PNBTHREADS;t++){
+      int intArr[2];
+      pipes[t]=intArr;
+      pipe(pipes[t]);
+      pip[t]=pipes[t][1];
+   }
+   
+   //create threads
+   pthread_mutex_init(&mutex, NULL);
+   for(t=0; t<PNBTHREADS; t++){
+       printf("In main: creating thread %d\n", t);
+       int myArray[t];
+       rc = pthread_create(&threads[t], NULL, recognizer, (void *)(myArray));
+       if (rc){
+          printf("ERROR; return code from pthread_create() is %d\n", rc);
+          exit(-1);
+       }
     }
 
-    if (config == NULL || (cmd_ln_str_r(config, "-infile") == NULL && cmd_ln_boolean_r(config, "-inmic") == FALSE)) {
-	E_INFO("Specify '-infile <file.wav>' to recognize from file or '-inmic yes' to recognize from microphone.\n");
-        cmd_ln_free_r(config);
-	return 1;
-    }
+  //wait until all joining threads terminate
+  pthread_exit(NULL);
+  //destroys pipes
+  for(t=0;t<PNBTHREADS;t++){
+    close(pipes[t][0]);
+    close(pipes[t][1]);
+  }
+  //destroy mutex
+  pthread_mutex_destroy(&mutex);
 
-    ps_default_search_args(config);
-    ps = ps_init(config);
-    if (ps == NULL) {
-        cmd_ln_free_r(config);
-        return 1;
-    }
-
-    E_INFO("%s COMPILED ON: %s, AT: %s\n\n", argv[0], __DATE__, __TIME__);
-
-    if (cmd_ln_str_r(config, "-infile") != NULL) {
-        recognize_from_file();
-    } else if (cmd_ln_boolean_r(config, "-inmic")) {
-        recognize_from_microphone();
-    }
-
-    ps_free(ps);
-    cmd_ln_free_r(config);
-
-    return 0;
+  return 0;  
 }
-
-#if defined(_WIN32_WCE)
-#pragma comment(linker,"/entry:mainWCRTStartup")
-#include <windows.h>
-//Windows Mobile has the Unicode main only
-int
-wmain(int32 argc, wchar_t * wargv[])
-{
-    char **argv;
-    size_t wlen;
-    size_t len;
-    int i;
-
-    argv = malloc(argc * sizeof(char *));
-    for (i = 0; i < argc; i++) {
-        wlen = lstrlenW(wargv[i]);
-        len = wcstombs(NULL, wargv[i], wlen);
-        argv[i] = malloc(len + 1);
-        wcstombs(argv[i], wargv[i], wlen);
-    }
-
-    //assuming ASCII parameters
-    return main(argc, argv);
 }
-#endif
