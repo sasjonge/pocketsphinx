@@ -162,7 +162,7 @@ static gboolean onMessage (GstBus *bus, GstMessage *message, gpointer userData)
 {
   GError *err;
   gchar *debug;
-
+  printf("\n\n%s\n\n","Reached onMessage");
   gst_message_parse_error(message, &err, &debug);
   printf("\n\n%s\n\n",GST_MESSAGE_SRC_NAME(message));
   printf("\n\n%s\n\n","Error:");
@@ -178,6 +178,7 @@ static gboolean onMessage (GstBus *bus, GstMessage *message, gpointer userData)
 //audio stream
 static void startAudiostream(int pip[])
 {
+  printf("\n%s\n","Start audiostream");
   //set pipe
   setpipe(pip);
   //bit rate 24Khz=192bits/s
@@ -218,8 +219,8 @@ static void startAudiostream(int pip[])
  
   //tcpserversrc
   _source = gst_element_factory_make("tcpserversrc", "source");  
-  g_object_set (G_OBJECT (_source), "host", "localhost",NULL);
-  g_object_set (G_OBJECT (_source), "port","7000" ,NULL);
+  g_object_set (G_OBJECT (_source), "host", HOST,NULL);
+  g_object_set (G_OBJECT (_source), "port",PORT ,NULL);
  
 
  
@@ -257,8 +258,14 @@ static void startAudiostream(int pip[])
  }
   //start streaming
   //_gst_thread = boost::thread( boost::bind(g_main_loop_run, _loop) );
-  pthread_t _gst_thread;
-  pthread_create(&_gst_thread, NULL, g_main_loop_run, &_loop);
+  //pthread_t _gst_thread;
+  //pthread_create(&_gst_thread, NULL, g_main_loop_run, (void *)_loop);
+  g_thread_create ((GThreadFunc) g_main_loop_run,
+                 _loop,
+                 TRUE,
+                 NULL);
+
+  printf("\n%s\n","!!!!!!!!!!!!!Thread audiostream");
 
 }
  //destructor
@@ -509,7 +516,7 @@ static void recognize_from_microphone(ps_decoder_t* ps, cmd_ln_t* config, int i)
         E_FATAL("Failed to start utterance\n");
     utt_started = FALSE;
     
-     inout=pipes[i][0]; 
+    inout=pipes[i][0]; 
     //making non blocking stream
     flags = fcntl(inout, F_GETFL, 0);
     fcntl(inout, F_SETFL, flags | O_NONBLOCK);
@@ -519,8 +526,10 @@ static void recognize_from_microphone(ps_decoder_t* ps, cmd_ln_t* config, int i)
       
     E_INFO("Ready....\n");
     for (;;) {
+        //E_INFO("RUN_LOOP");
        //printf("...........NOTHING %d %d....\n",i,k);
         k = read(inout, adbuf, 4096);
+        //printf("\n k Is %d \n",k);
         if(k==-1)
            k++;
         if (k < 0)
@@ -619,13 +628,14 @@ void *recognizer(void*arg)
 
      int i;
      i=*((int*)arg);
-      printf("\n%s\n","in");
+      printf("\n%d\n",i);
 
      if(FALSE) {
         configobj[i]= cmd_ln_init(NULL,  cont_args_def,TRUE, "-dict", configDict[i],"-lm", configLM[i], "-inmic", "yes",NULL);
      }
       else {
         printf("\n%s\n",configDict[i]);
+        printf("\n%s\n",configLM[i]);
         configobj[i]= cmd_ln_init(NULL,  cont_args_def,TRUE, "-dict", configDict[i],"-lm", configLM[i], "-inmic", "yes",NULL);
       }
 
@@ -703,10 +713,10 @@ main(int argc, char *argv[])
    DATAPATH=argv[6];
     printf("\n%s","DATAPATH: ");
     printf("%s\n",DATAPATH);
-   ASRCWD="/home/sascha/suturo16/catkin_ws/src/pepper-dialog";
+   ASRCWD=argv[7];
     printf("\n%s","ASRCWD: ");
     printf("%s\n",ASRCWD);
-   RPCPORT="7000";
+   RPCPORT="8000";
     printf("\n%s","RPCPORT: ");
     printf("%s\n",RPCPORT);
    TRESHOLDY=-10000;
@@ -769,8 +779,10 @@ main(int argc, char *argv[])
    pthread_mutex_init(&mutex, NULL);
    for(t=0; t<PNBTHREADS; t++){
        printf("In main: creating thread %d\n", t);
-       int myArray[t];
-       rc = pthread_create(&threads[t], NULL, recognizer, (void *)(myArray));
+       int *tpoint;
+       tpoint =(int*)malloc(sizeof(int)) ;
+       *tpoint=t;
+       rc = pthread_create(&threads[t], NULL, recognizer, (void*) tpoint);
        if (rc){
           printf("ERROR; return code from pthread_create() is %d\n", rc);
           exit(-1);
