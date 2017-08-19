@@ -147,6 +147,10 @@ static char* _format;
 static guint8 *data; 
 static int in[NBTHREADS];
 
+void* runner(void* lp){
+      g_main_loop_run((GMainLoop*)lp);
+      return NULL;
+} 
 
 static void setpipe(int pIn[]){
     int flags,i;
@@ -260,10 +264,8 @@ static void startAudiostream(int pip[])
   //_gst_thread = boost::thread( boost::bind(g_main_loop_run, _loop) );
   //pthread_t _gst_thread;
   //pthread_create(&_gst_thread, NULL, g_main_loop_run, (void *)_loop);
-  g_thread_create ((GThreadFunc) g_main_loop_run,
-                 _loop,
-                 TRUE,
-                 NULL);
+  pthread_t p;
+	pthread_create(&p,NULL,runner,(void*)_loop);
 
   printf("\n%s\n","!!!!!!!!!!!!!Thread audiostream");
 
@@ -769,8 +771,7 @@ main(int argc, char *argv[])
    gst_init(&argc, &argv);
    //create pipes
    for(t=0;t<PNBTHREADS;t++){
-      int intArr[2];
-      pipes[t]=intArr;
+      pipes[t]=(int*)malloc(sizeof(int)*2);
       pipe(pipes[t]);
       pip[t]=pipes[t][1];
    }
