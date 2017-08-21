@@ -718,10 +718,10 @@ main(int argc, char *argv[])
    ASRCWD=argv[7];
     printf("\n%s","ASRCWD: ");
     printf("%s\n",ASRCWD);
-   RPCPORT="8000";
+   RPCPORT=argv[8];
     printf("\n%s","RPCPORT: ");
     printf("%s\n",RPCPORT);
-   TRESHOLDY=-10000;
+   TRESHOLDY=atoi(argv[9])
     printf("\n%s","TRESHOLD: ");
     printf("%i\n",TRESHOLDY);
    HMM=argv[10];
