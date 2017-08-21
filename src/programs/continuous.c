@@ -721,7 +721,7 @@ main(int argc, char *argv[])
    RPCPORT=argv[8];
     printf("\n%s","RPCPORT: ");
     printf("%s\n",RPCPORT);
-   TRESHOLDY=atoi(argv[9])
+   TRESHOLDY=atoi(argv[9]);
     printf("\n%s","TRESHOLD: ");
     printf("%i\n",TRESHOLDY);
    HMM=argv[10];
